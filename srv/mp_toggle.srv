@@ -1,0 +1,9 @@
+# request constants
+
+# request fields
+int16 val
+---
+# response constants
+
+# response fields
+string res

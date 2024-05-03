@@ -1,0 +1,366 @@
+#!/usr/bin/python
+
+#
+# script-compile.py -- compile Mindprobe scripts
+# 
+
+import struct
+import sys
+import math
+
+# How this works: The human-readable script is actually Python code.
+# Below we define the functions that it calls; they generate TLV
+# sequences.  At the end of this file, we exec the script and write
+# the entire TLV sequence to an ouput file.
+
+# Enumerated values:
+
+SCRIPT                           = 1
+SCRIPT_CMD_STOP                  = 2
+SCRIPT_CMD_GO_VELOCITY           = 3
+SCRIPT_CMD_GO_V_RADIUS           = 4
+SCRIPT_CMD_GO_DISTANCE           = 5
+SCRIPT_CMD_GO_ANGLE              = 6
+SCRIPT_CMD_GO_ANGLE_RADIUS       = 7
+SCRIPT_CMD_GO_HEADING            = 8
+SCRIPT_CMD_POSE                  = 9
+SCRIPT_CMD_POSE_RELATIVE         = 10
+SCRIPT_CMD_RAY                   = 11
+SCRIPT_CMD_RAY_RELATIVE          = 12
+SCRIPT_CMD_WAIT_SECONDS          = 13
+SCRIPT_CMD_WAIT_MOTION_COMPLETE  = 14
+SCRIPT_CMD_SET_WHEEL_SPEED_LIMIT = 15
+SCRIPT_CMD_SET_WHEEL_ACCEL_LIMIT = 16
+SCRIPT_CMD_SET_V_LIMIT           = 17
+SCRIPT_CMD_SET_W_LIMIT           = 18
+SCRIPT_CMD_SET_TRANS_ACCEL_LIMIT = 19
+SCRIPT_CMD_SET_TRANS_DECEL_LIMIT = 20
+SCRIPT_CMD_SET_ROT_ACCEL_LIMIT   = 21
+SCRIPT_CMD_RESTORE_DEFAULT_LIMITS = 22
+SCRIPT_CMD_STATE                 = 23
+SCRIPT_CMD_STATE_RELATIVE        = 24
+SCRIPT_CMD_SET_ROBOT_POSE        = 25
+SCRIPT_CMD_MANIPULATOR_UP        = 26
+SCRIPT_CMD_MANIPULATOR_DOWN      = 27
+SCRIPT_CMD_GRIPPER_OPEN          = 28
+SCRIPT_CMD_GRIPPER_CLOSE         = 29
+SCRIPT_CMD_GRIPPER_REGRIP        = 30
+SCRIPT_CMD_WAIT_MANIP_UP         = 31
+SCRIPT_CMD_WAIT_MANIP_DOWN       = 32
+SCRIPT_CMD_WAIT_GRIPPER_CLOSED   = 33
+SCRIPT_CMD_WAIT_GRIPPER_OPEN     = 34
+
+SCRIPT_CMD_RECORD_SCAN           = 35
+SCRIPT_CMD_STOP_SCAN_RECORDING   = 36
+SCRIPT_CMD_WAIT_SCAN_RECORDING_COMPLETE = 37
+
+SCRIPT_CMD_PLAYBACK_SCAN         = 38
+SCRIPT_CMD_WAIT_SCAN_PLAYBACK_COMPLETE = 39
+
+SCRIPT_CMD_ARM_SET_TARGET        = 40
+SCRIPT_CMD_ARM_WAIT_TARGET       = 41
+SCRIPT_CMD_GRIPPER_SET_TARGET    = 42
+SCRIPT_CMD_GRIPPER_WAIT_TARGET   = 43
+
+SCRIPT_CMD_GO_POT_PLACE          = 44
+SCRIPT_CMD_GO_TURN_IN_PLACE      = 45
+
+# Script flow control
+SCRIPT_CMD_REPEAT_SCRIPT         = 200
+
+class DEG:
+    @staticmethod
+    def toRad(deg):
+        return deg2rad(deg)
+    @staticmethod
+    def toDeg(deg):
+        return float(deg)
+    pass
+
+class RAD:
+    @staticmethod
+    def toRad(rad):
+        return float(rad)
+    @staticmethod
+    def toDeg(rad):
+        return rad2deg(deg)
+    pass
+
+def calc_relative_state(start, finish, angle_units):
+    relX = finish[0] - start[0]
+    relY = finish[1] - start[1]
+    cnt = math.cos(angle_units.toRad(-start[2]))
+    snt = math.sin(angle_units.toRad(-start[2]))
+    return (relX * cnt - relY * snt,
+            relY * cnt + relX * snt,
+            finish[2] - start[2],
+            finish[3],
+            finish[4])
+
+
+#help_go_state_relative((-0.233399, 0.369173, 6.281574, 1.659780, 0.006423),
+#                       (1.236126, 1.099687, 0.461332, 0.000000, 0.000000), angle_units=RAD)
+
+# Degrees increase counter-clockwise.  Do not fly these robots!
+def deg2rad(deg):
+    rad = (deg / 360.0) * math.pi * 2
+    return rad
+
+def rad2deg(rad):
+    deg = (rad / math.pi / 2) * 360.0
+    return deg
+
+def help_go_state_relative(start, finish, angle_units=DEG):
+    relState = calc_relative_state(start       = start,
+                                   finish      = finish,
+                                   angle_units = angle_units)
+    go_velocity(v=start[3], w=start[4], angle_units=angle_units)
+    maxAccel = 1.8
+    timeToSpeed = abs(start[3] / maxAccel)
+    wait(timeToSpeed + 0.1)
+    go_state_relative(*relState, angle_units=angle_units)
+
+def make_tlv(t, v = ''):
+    return struct.pack("<HH", t, len(v)) + v
+
+def write_command(t, v = ''):
+    global command_buffer
+    command_buffer += make_tlv(t, v)
+
+# The commands that appear in the script file:
+
+def wait(t):
+    write_command(SCRIPT_CMD_WAIT_SECONDS, struct.pack("<f", t))
+
+def wait_motion_complete(t = None):
+    if t != None:
+        write_command(SCRIPT_CMD_WAIT_MOTION_COMPLETE, struct.pack("<f", t))
+    else:
+        write_command(SCRIPT_CMD_WAIT_MOTION_COMPLETE)
+
+def go_velocity(v, w, angle_units=DEG):
+    write_command(SCRIPT_CMD_GO_VELOCITY, struct.pack("<ff", v, angle_units.toRad(w)))
+        
+def go_v_radius(v, r):
+    write_command(SCRIPT_CMD_GO_V_RADIUS, struct.pack("<ff", v, r))
+
+def stop():
+    write_command(SCRIPT_CMD_STOP)
+    wait_motion_complete()
+
+def go_distance(d, v, w, angle_units=DEG):
+    write_command(SCRIPT_CMD_GO_DISTANCE, struct.pack("<fff", d, v, angle_units.toRad(w)))
+    wait_motion_complete()
+        
+def go_angle(a, v, w, angle_units=DEG):
+    write_command(SCRIPT_CMD_GO_ANGLE, struct.pack("<fff", angle_units.toRad(a), v, angle_units.toRad(w)))
+    wait_motion_complete()
+        
+def go_angle_radius(a, v, r, angle_units=DEG):
+    write_command(SCRIPT_CMD_GO_ANGLE_RADIUS, struct.pack("<fff", angle_units.toRad(a), v, r))
+    wait_motion_complete()
+
+def go_turn_in_place( h, w, v, angle_units=DEG ):
+    write_command(SCRIPT_CMD_GO_TURN_IN_PLACE, struct.pack("<fff", angle_units.toRad(h), angle_units.toRad(w), v))
+    wait_motion_complete()
+        
+def go_heading(h, v, w, angle_units=DEG):
+    write_command(SCRIPT_CMD_GO_HEADING, struct.pack("<fff", angle_units.toRad(h), v, angle_units.toRad(w)))
+    wait_motion_complete()
+        
+def go_pose(x, y, h, angle_units=DEG):
+    write_command(SCRIPT_CMD_POSE, struct.pack("<fff", x, y, angle_units.toRad(h)))
+    wait_motion_complete()
+
+def go_pose_relative(x, y, h, angle_units=DEG):
+    write_command(SCRIPT_CMD_POSE_RELATIVE, struct.pack("<fff", x, y, angle_units.toRad(h)))
+    wait_motion_complete()
+
+def go_state(x, y, h, v, w, angle_units=DEG):
+    write_command(SCRIPT_CMD_STATE, struct.pack("<fffff",
+                                                x, y, angle_units.toRad(h),
+                                                v, angle_units.toRad(w)))
+    wait_motion_complete()
+    
+def go_state_relative(x, y, h, v, w, angle_units=DEG):
+    write_command(SCRIPT_CMD_STATE_RELATIVE, struct.pack("<fffff",
+                                                         x, y, angle_units.toRad(h),
+                                                         v, angle_units.toRad(w)))
+    wait_motion_complete()
+
+def go_ray(x, y, h, v, angle_units=DEG):
+    cmd = SCRIPT_CMD_RAY
+    write_command(cmd, struct.pack("<ffff", x, y, angle_units.toRad(h), v))
+    wait_motion_complete()
+    
+def go_pot_place(x, y, wait=True):
+    cmd = SCRIPT_CMD_GO_POT_PLACE
+    write_command(cmd, struct.pack("<ff", x, y))
+    if wait:
+        wait_motion_complete()
+    
+def set_robot_pose( x, y, h, angle_units=DEG ):
+    write_command(SCRIPT_CMD_SET_ROBOT_POSE, struct.pack("<fff", x, y, angle_units.toRad(h)))
+
+def set_wheel_speed_limit(limit):
+    write_command(SCRIPT_CMD_SET_WHEEL_SPEED_LIMIT, struct.pack("<f", limit))
+
+def set_wheel_accel_limit(limit):
+    write_command(SCRIPT_CMD_SET_WHEEL_ACCEL_LIMIT, struct.pack("<f", limit))
+
+def set_v_limit(limit):
+    write_command(SCRIPT_CMD_SET_V_LIMIT, struct.pack("<f", limit))
+
+def set_w_limit(limit):
+    write_command(SCRIPT_CMD_SET_W_LIMIT, struct.pack("<f", limit))
+
+def set_trans_accel_limit(limit):
+    write_command(SCRIPT_CMD_SET_TRANS_ACCEL_LIMIT, struct.pack("<f", limit))
+
+def set_trans_decel_limit(limit):
+    write_command(SCRIPT_CMD_SET_TRANS_DECEL_LIMIT, struct.pack("<f", limit))
+
+def set_rot_accel_limit(limit):
+    write_command(SCRIPT_CMD_SET_ROT_ACCEL_LIMIT, struct.pack("<f", limit))
+
+def restore_default_limits():
+    write_command(SCRIPT_CMD_RESTORE_DEFAULT_LIMITS)
+
+# Command manipulator
+
+def arm_up(target=None, wait=True):
+    if target is None:
+        write_command(SCRIPT_CMD_MANIPULATOR_UP)
+        if wait:
+            wait_arm_up()
+    else:
+        if isinstance(target, bool):
+            raise TypeError("Boolean passed as target argument. Use \"wait=False\"")
+        write_command(SCRIPT_CMD_ARM_SET_TARGET, struct.pack("<f", target))
+        if wait:
+            wait_arm()
+
+def arm_down(wait=True):
+    write_command(SCRIPT_CMD_MANIPULATOR_DOWN)
+    if wait:
+        wait_arm_down()
+
+def gripper_open(target=None, wait=True):
+    if target is None:
+        write_command(SCRIPT_CMD_GRIPPER_OPEN)
+        if wait:
+          wait_gripper_open()
+    else:
+        if isinstance(target, bool):
+            raise TypeError("Boolean passed as target argument. Use \"wait=False\"")
+        write_command(SCRIPT_CMD_GRIPPER_SET_TARGET, struct.pack("<f", target))
+        if wait:
+            wait_gripper()
+
+def gripper_close(wait=True):
+    write_command(SCRIPT_CMD_GRIPPER_CLOSE)
+    if wait:
+        wait_gripper_closed()
+
+# Wait for manipulator
+
+def wait_arm_up():
+    write_command(SCRIPT_CMD_WAIT_MANIP_UP)
+
+def wait_arm_down():
+    write_command(SCRIPT_CMD_WAIT_MANIP_DOWN)
+
+def wait_gripper_open():
+    write_command(SCRIPT_CMD_WAIT_GRIPPER_OPEN)
+
+def wait_gripper_closed():
+    write_command(SCRIPT_CMD_WAIT_GRIPPER_CLOSED)
+
+def wait_arm():
+    write_command(SCRIPT_CMD_ARM_WAIT_TARGET)
+
+def wait_gripper():
+    write_command(SCRIPT_CMD_GRIPPER_WAIT_TARGET)
+
+def record_scan(numPrevScans, numNextScans, filename = ''):
+    if not filename:
+        filename = ""
+    else:
+        filename = str(filename)
+    write_command(SCRIPT_CMD_RECORD_SCAN,
+                  struct.pack("<ii%ds"%(len(filename)+1,),
+                              int(numPrevScans),
+                              int(numNextScans),
+                              filename))
+    return
+
+def stop_scan_recording():
+    write_command(SCRIPT_CMD_STOP_SCAN_RECORDING)
+    return
+
+def wait_scan_recording_complete():
+    write_command(SCRIPT_CMD_WAIT_SCAN_RECORDING_COMPLETE)
+    return
+
+def playback_scan(filename):
+    filename = str(filename)
+    write_command(SCRIPT_CMD_PLAYBACK_SCAN,
+                  struct.pack("<%ds"%(len(filename)+1,), filename))
+    return
+
+def wait_scan_playback_complete():
+    write_command(SCRIPT_CMD_WAIT_SCAN_PLAYBACK_COMPLETE)
+    return
+
+def repeat():
+    write_command(SCRIPT_CMD_REPEAT_SCRIPT)
+    return
+
+#Logo
+        
+def fd(d):
+    go_distance(d/10.0, 2.0, 0.0)
+    stop()
+
+def bk(d):
+    go_distance(d/10.0, -2.0, 0.0)
+    stop()
+
+def rt(a):
+    go_angle(a, 0.0, 180.0)
+    stop()
+
+def lt(a):
+    go_angle(a, 0.0, -180.0)
+    stop()
+
+if len(sys.argv) != 3:
+    print "Usage: script-compile script-name output-file"
+    print "       script-compile --stdout script-name"
+    exit(1)
+
+if sys.argv[1] == '--stdout':
+    scriptname = sys.argv[2]
+    outfile = sys.stdout
+else:
+    scriptname = sys.argv[1]
+    outfile = open(sys.argv[2], 'w')
+
+command_buffer = ''
+
+# Execute commands from the script file now.  They add to the command
+# buffer.
+
+execfile(scriptname)
+
+if len(command_buffer) > 0x10000 - 4:
+    print "Compiled script would be too long (%d bytes)" % \
+        (len(command_buffer) + 4)
+    exit(1)
+
+# Encode a TLV around the command buffer itself:
+script = make_tlv(SCRIPT, command_buffer)
+
+# Write the output to argv[2]:
+outfile.write(script)
+outfile.close()

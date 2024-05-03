@@ -1,0 +1,10 @@
+# request constants
+
+# request fields
+float32 x
+float32 y
+---
+# response constants
+
+# response fields
+string res

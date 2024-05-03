@@ -1,0 +1,9 @@
+# request constants
+
+# request fields
+code int
+---
+# response constants
+
+# response fields
+string value
